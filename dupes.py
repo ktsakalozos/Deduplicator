@@ -6,7 +6,8 @@ import sys
 import hashlib
 import getopt
 
-read_blocksize = 409600
+read_blocksize = 16*1024
+
 class file_info(object):
     def __init__(self, f):
         self.filename = f
@@ -28,46 +29,20 @@ def sha1(filename):
         block = f.read(read_blocksize)
     return h.digest()
 
-##def normalized_extension(filename):
-##    ext = os.path.splitext(filename)[1].upper()
-##    if ext == ".JPEG":
-##        return ".JPG"
-##    elif ext == ".MPEG":
-##        return ".MPG"
-##    elif ext == ".TIFF":
-##        return ".TIF"
-##    elif ext == ".HTM":
-##        return ".HTML"
-##    elif ext == ".AIFF":
-##        return ".AIF"
-##    elif ext == ".MIDI":
-##        return ".MID"
-##    else:
-##        return ext
-##    
-##
-##def identical(f1, f2):
-##    try:
-##        f1 = open(f2, "rb")
-##        f2 = open(f2, "rb")
-##        d1, d2 = 'foo', 'bar'
-##        while d1 and d2:
-##            d1 = f1.read(read_blocksize)
-##            d2 = f2.read(read_blocksize)
-##            if d1 != d2 or len(d1) != len(d2):
-##                return False
-##        return True
-##    except:
-##        return False
+def fast_hash(filename):
+    f = open(filename, 'rb')
+    h = hashlib.md5()
+    block = f.read(read_blocksize)
+    h.update(block)
+    return h.digest()
 
-def group_by_size():
+def group_by_size(filenames):
     by_size = {}
-    for fname in sys.stdin.readlines():
-        fname = fname[:-1] #discard newline
+    for fname in filenames:
         try:
             info = file_info(fname)
         except OSError:
-            sys.stderr.write("Could not stat " + fname + " skipping...\n")
+            sys.stderr.write("Could not stat {} skipping...\n".format(fname))
             continue
         if not info.regular_file():
             continue
@@ -78,7 +53,7 @@ def group_by_size():
             by_size[size] = [info]
     return [item for item in by_size.values() if len(item) > 1 ]
 
-def group_identical(files):
+def group_by_inode(files):
     by_inode = {}
     for f in files:
         inode = f.stat.st_ino
@@ -86,24 +61,30 @@ def group_identical(files):
             by_inode[inode].append(f)
         else:
             by_inode[inode] = [f]
-    
+    return by_inode
+
+def group_by_hash(files, hash_function):
+    by_inode = group_by_inode(files)
     if len(by_inode) <= 1:
-        return [files]
+        return [files] if len(files)>1 else []
 
     by_hash = {}
     for inode in by_inode:
         try:
-            h = sha1(by_inode[inode][0].filename)
+            h = hash_function(by_inode[inode][0].filename)
         except IOError:
-            sys.stderr.write("Could not get signature for " +
-                             by_inode[inode][0].filename + " skipping...\n")
+            msg = "Could not get hash for {} skipping...\n".format(by_inode[inode][0].filename)
+            sys.stderr.write(msg)
             continue
         if h in by_hash:
             by_hash[h] = by_hash[h] + by_inode[inode]
         else:
             by_hash[h] = by_inode[inode]
-    
+
     return [files for files in by_hash.values() if len(files) > 1]
+
+def group_identical(files):
+    return group_by_hash(files, sha1)
 
 def listing_print(l):
     print('')
@@ -114,11 +95,11 @@ def listing_print(l):
 def hardlink(src, dest):
     if src.stat.st_dev != dest.stat.st_dev:
         print("{} and {} are not on the same device"\
-            .format(src.filename, dest.filename), file=sys.stderr)
+              .format(src.filename, dest.filename), file=sys.stderr)
         return False
 
     try:
-        backup = dest.filename + ".bak"
+        backup = "{}.bak".format(dest.filename.decode())
         os.rename(dest.filename, backup)
         print("linking...\n{} to \n{}".format(src.filename, dest.filename))
         os.link(src.filename, dest.filename)
@@ -154,8 +135,7 @@ def make_hardlinks(files):
             if not hardlink(master, f):
                 print("Could not hardlink {} to {} ...skipping"\
                       .format(master.filename, f.filename), file=sys.stderr)
-                
-                
+
 
 def system(cmd, params):
     ex = cmd.split()[0]
@@ -166,7 +146,13 @@ def system(cmd, params):
 
 def print_help():
     print('Usage: dupes [--exec command | --hardlink]', file=sys.stderr)
-    
+
+def filenames_stdin():
+    stream = sys.stdin
+    if sys.version_info[0] >= 3:
+        stream = sys.stdin.buffer
+    for fname in stream.readlines():
+        yield fname[:-1] #discard newline
 
 #parse parameters
 try:
@@ -180,11 +166,17 @@ except:
 #setup action on duplicates
 action = listing_print
 if optlist and optlist[0][0] == '--hardlink':
-    action = make_hardlinks 
+    action = make_hardlinks
 elif optlist:
     cmd = optlist[0][1]
     action = lambda params: system(cmd, params)
 
-for ss in group_by_size():
-    for sf in group_identical(ss):
-        action(sf)
+
+for same_size in group_by_size( filenames_stdin() ):
+    for same_fhash in group_by_hash(same_size, fast_hash):
+        for identical in group_identical(same_fhash):
+            # Don't do anything for lonely files
+            if len(identical) <= 1:
+                continue
+
+            action(identical)
