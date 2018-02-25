@@ -5,11 +5,14 @@ description: |
   Dupes is a deduplicator utility that will get a list of files
   and replace the identical ones with hardlinks.
 grade: stable # must be 'stable' to release into candidate/stable channels
-confinement: classic # use 'strict' once you have the right plugs and slots
+confinement: strict # use 'strict' once you have the right plugs and slots
 
 apps:
   dupes:
     command: usr/bin/python3 $SNAP/dupes.py
+    plugs:
+      - home
+      - removable-media
 
 parts:
   dupes:
